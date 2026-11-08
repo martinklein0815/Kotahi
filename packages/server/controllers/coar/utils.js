@@ -29,6 +29,68 @@ const getRorOrganisation = async value => {
   }
 }
 
+/**
+ * Bearer tokens for outgoing COAR Notify messages, from the
+ * COAR_OUTBOUND_TOKENS environment variable: a JSON object whose keys are
+ * either a full inbox URL or an origin (scheme + host, covering every inbox on
+ * that host), and whose values are the tokens. For example:
+ * {"https://repo.example.org/api/notify-inbox": "s3cret"}
+ * @returns {Record<string, string>}
+ */
+const getOutboundTokens = () => {
+  const raw = process.env.COAR_OUTBOUND_TOKENS
+
+  if (!raw || !raw.trim()) return {}
+
+  try {
+    const tokens = JSON.parse(raw)
+
+    if (!tokens || typeof tokens !== 'object' || Array.isArray(tokens)) {
+      throw new Error('expected a JSON object')
+    }
+
+    return tokens
+  } catch (error) {
+    logger.error(
+      `COAR: COAR_OUTBOUND_TOKENS is not valid (${error.message}), sending without auth tokens`,
+    )
+    return {}
+  }
+}
+
+const withoutTrailingSlash = value => value.replace(/\/+$/, '')
+
+/**
+ * Finds the bearer token for an inbox URL: an exact match on the inbox URL
+ * wins (trailing slashes ignored), otherwise a key matching its origin.
+ * @param {string} url The destination inbox URL
+ * @returns {string|null}
+ */
+const getOutboundTokenForInbox = url => {
+  const tokens = getOutboundTokens()
+  const entries = Object.entries(tokens)
+
+  if (!entries.length || !url) return null
+
+  const target = withoutTrailingSlash(url)
+
+  const exact = entries.find(([key]) => withoutTrailingSlash(key) === target)
+
+  if (exact) return exact[1] || null
+
+  let origin
+
+  try {
+    origin = new URL(url).origin
+  } catch {
+    return null
+  }
+
+  const byOrigin = entries.find(([key]) => withoutTrailingSlash(key) === origin)
+
+  return byOrigin ? byOrigin[1] || null : null
+}
+
 const isRetryable = error => {
   const status = error.response?.status
 
@@ -71,13 +133,20 @@ const wait = ms =>
 /**
  * POSTs a COAR Notify payload to an LDN inbox, retrying transient failures
  * (network errors, 408, 429 and 5xx gateway errors). Retries resend the same
- * payload, so the receiver can deduplicate on its id.
+ * payload, so the receiver can deduplicate on its id. Sends a bearer token
+ * when COAR_OUTBOUND_TOKENS has one for this inbox.
  * @param {string} url The destination inbox URL
  * @param {object} payload The COAR Notify payload to be sent
  * @returns {Promise<object>}
  */
 const postToInbox = async (url, payload) => {
   const data = typeof payload === 'string' ? payload : JSON.stringify(payload)
+  const token = getOutboundTokenForInbox(url)
+
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
 
   for (let retryCount = 0; ; retryCount += 1) {
     try {
@@ -85,7 +154,7 @@ const postToInbox = async (url, payload) => {
       return await request({
         method: 'post',
         url,
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         data,
       })
     } catch (error) {
@@ -104,6 +173,7 @@ const postToInbox = async (url, payload) => {
 }
 
 module.exports = {
+  getOutboundTokenForInbox,
   getRorOrganisation,
   postToInbox,
 }

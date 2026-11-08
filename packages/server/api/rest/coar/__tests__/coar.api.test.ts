@@ -71,7 +71,11 @@ const crossrefWork = {
 
 type SentToOrigin = { id?: string; type: string | string[]; summary?: string }
 
-type AxiosConfig = { url: string; data?: string }
+type AxiosConfig = {
+  url: string
+  data?: string
+  headers?: { get?: (name: string) => unknown; [key: string]: unknown }
+}
 
 type InboxFailure = { status: number; headers?: Record<string, string> }
 
@@ -92,6 +96,9 @@ type CoarPayload = {
 type InboxResult = { status: number; message: string }
 
 let sentToOrigin: SentToOrigin[] = []
+
+// The Authorization header of each request to the origin inbox
+let authToOrigin: (string | undefined)[] = []
 
 // Responses the origin inbox gives before it starts accepting notifications
 let originInboxFailures: InboxFailure[] = []
@@ -154,6 +161,12 @@ const fakeAdapter = (axiosConfig: AxiosConfig): Promise<AxiosResponse> => {
 
   if (url === ORIGIN_INBOX) {
     sentToOrigin.push(JSON.parse(axiosConfig.data ?? '{}'))
+
+    const authorization =
+      axiosConfig.headers?.get?.('Authorization') ??
+      axiosConfig.headers?.Authorization
+
+    authToOrigin.push(authorization ? String(authorization) : undefined)
 
     const failure = originInboxFailures.shift()
 
@@ -258,6 +271,7 @@ describe('COAR Notify inbox API', () => {
 
   beforeEach(async () => {
     sentToOrigin = []
+    authToOrigin = []
     originInboxFailures = []
 
     group = await Group.insert({ name: 'coar-group', isArchived: false })
@@ -611,6 +625,77 @@ describe('COAR Notify inbox API', () => {
       await vi.advanceTimersByTimeAsync(10000)
       expect(sentToOrigin).toHaveLength(2)
       await expect(capped).resolves.toMatchObject({ status: 201 })
+    })
+
+    describe('with COAR_OUTBOUND_TOKENS', () => {
+      const originalTokens = process.env.COAR_OUTBOUND_TOKENS
+
+      afterEach(() => {
+        if (originalTokens === undefined) {
+          delete process.env.COAR_OUTBOUND_TOKENS
+        } else {
+          process.env.COAR_OUTBOUND_TOKENS = originalTokens
+        }
+      })
+
+      it('sends no Authorization header when no token is configured', async () => {
+        delete process.env.COAR_OUTBOUND_TOKENS
+
+        await send({ type: 'Announce' })
+
+        expect(authToOrigin).toEqual([undefined])
+      })
+
+      it('sends the bearer token configured for the inbox URL', async () => {
+        process.env.COAR_OUTBOUND_TOKENS = JSON.stringify({
+          [`${ORIGIN_INBOX}/`]: 'inbox-token',
+          'https://repository.test': 'host-token',
+        })
+
+        await send({ type: 'Announce' })
+
+        expect(authToOrigin).toEqual(['Bearer inbox-token'])
+      })
+
+      it('falls back to a token configured for the inbox host', async () => {
+        process.env.COAR_OUTBOUND_TOKENS = JSON.stringify({
+          'https://repository.test/': 'host-token',
+        })
+
+        await send({ type: 'Announce' })
+
+        expect(authToOrigin).toEqual(['Bearer host-token'])
+      })
+
+      it('sends the token again on every retry', async () => {
+        process.env.COAR_OUTBOUND_TOKENS = JSON.stringify({
+          [ORIGIN_INBOX]: 'inbox-token',
+        })
+        originInboxFailures = [{ status: 503 }]
+
+        await send({ type: 'Announce' })
+
+        expect(authToOrigin).toEqual(['Bearer inbox-token', 'Bearer inbox-token'])
+      })
+
+      it('does not send a token configured for another inbox', async () => {
+        process.env.COAR_OUTBOUND_TOKENS = JSON.stringify({
+          'https://other.test/inbox': 'other-token',
+        })
+
+        await send({ type: 'Announce' })
+
+        expect(authToOrigin).toEqual([undefined])
+      })
+
+      it('sends without a token when the setting is not valid JSON', async () => {
+        process.env.COAR_OUTBOUND_TOKENS = '{not json'
+
+        const { value } = await send({ type: 'Announce' })
+
+        expect(value?.status).toBe(201)
+        expect(authToOrigin).toEqual([undefined])
+      })
     })
   })
 })
