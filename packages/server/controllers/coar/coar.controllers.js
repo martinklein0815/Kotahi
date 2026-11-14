@@ -3,7 +3,7 @@ const { logger, serverUrl, request, useTransaction } = require('@coko/server')
 const { getCrossrefDataViaDoi } = require('./crossRef')
 const { getDataciteViaDoi } = require('./dataCite')
 const { makeAnnouncementOnCOAR, generateUrn } = require('./announcement')
-const { postToInbox } = require('./utils')
+const { getOutboundActor, postToInbox } = require('./utils')
 
 const {
   CoarNotification,
@@ -112,13 +112,13 @@ const sendTentativeAcceptCoarNotification = async (
       'https://www.w3.org/ns/activitystreams',
       'https://coar-notify.net',
     ],
-    actor: {
+    actor: getOutboundActor({
       id: handlingEditor.orcid
         ? `https://orcid.org/${handlingEditor.orcid}`
         : handlingEditor.email,
       type: 'Person',
       name: handlingEditor.username,
-    },
+    }),
     id: generateUrn(),
     inReplyTo: offerPayload.id,
     object: tentativeAcceptObject,
@@ -195,7 +195,7 @@ const sendRejectCoarNotification = async (
       'https://www.w3.org/ns/activitystreams',
       'https://coar-notify.net',
     ],
-    actor,
+    actor: getOutboundActor(actor),
     id: generateUrn(),
     inReplyTo: offerPayload.id,
     object: rejectObject,
@@ -255,7 +255,7 @@ const sendUnprocessableCoarNotification = async (
       'https://www.w3.org/ns/activitystreams',
       'https://coar-notify.net',
     ],
-    actor,
+    actor: getOutboundActor(actor),
     id: generateUrn(),
     inReplyTo: notificationId,
     object: originalPayload,

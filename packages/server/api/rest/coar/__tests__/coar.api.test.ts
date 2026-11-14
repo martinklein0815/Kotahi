@@ -24,7 +24,10 @@ import {
   Token,
 } from '../../../../models'
 
-import { postToInbox } from '../../../../controllers/coar/utils'
+import {
+  getOutboundActor,
+  postToInbox,
+} from '../../../../controllers/coar/utils'
 
 // Outbound HTTP (DOI registration agency, Crossref, the sender's inbox) goes
 // through axios. Kotahi and @coko/server each have their own copy, so both get
@@ -69,7 +72,12 @@ const crossrefWork = {
   resource: { primary: { URL: 'https://www.biorxiv.org/content/test' } },
 }
 
-type SentToOrigin = { id?: string; type: string | string[]; summary?: string }
+type SentToOrigin = {
+  id?: string
+  type: string | string[]
+  summary?: string
+  actor?: { id: string; type: string; name: string }
+}
 
 type AxiosConfig = {
   url: string
@@ -379,6 +387,41 @@ describe('COAR Notify inbox API', () => {
       ])
       expect(sentToOrigin[0].summary).toBe('Unauthorised Request')
     })
+
+    describe('with COAR_ACTOR_ID', () => {
+      const originalActorId = process.env.COAR_ACTOR_ID
+
+      afterEach(() => {
+        if (originalActorId === undefined) {
+          delete process.env.COAR_ACTOR_ID
+        } else {
+          process.env.COAR_ACTOR_ID = originalActorId
+        }
+      })
+
+      it('names the configured service as the actor of the flag', async () => {
+        process.env.COAR_ACTOR_ID = 'https://kotahi.example.org'
+
+        await post(buildOffer(), { authorization: 'Bearer wrong-token' })
+
+        expect(sentToOrigin[0].actor).toEqual({
+          id: 'https://kotahi.example.org',
+          type: 'Service',
+          name: 'Kotahi',
+        })
+      })
+
+      it('keeps the default actor when it is not set', async () => {
+        delete process.env.COAR_ACTOR_ID
+
+        await post(buildOffer(), { authorization: 'Bearer wrong-token' })
+
+        expect(sentToOrigin[0].actor).toMatchObject({
+          id: 'https://kotahi.community',
+          type: 'Organization',
+        })
+      })
+    })
   })
 
   describe('offers', () => {
@@ -627,6 +670,73 @@ describe('COAR Notify inbox API', () => {
       await expect(capped).resolves.toMatchObject({ status: 201 })
     })
 
+    it('fails with an error that keeps the inbox answer but not the token', async () => {
+      const originalTokens = process.env.COAR_OUTBOUND_TOKENS
+      process.env.COAR_OUTBOUND_TOKENS = JSON.stringify({
+        [ORIGIN_INBOX]: 'secret-inbox-token',
+      })
+      originInboxFailures = [{ status: 403 }]
+
+      try {
+        const { error } = await send({ type: 'Announce' })
+
+        expect(error.name).toBe('InboxPostError')
+        expect(error.response.status).toBe(403)
+        expect(error.message).toContain('status code 403')
+        expect(error.message).toContain('no available server')
+        expect(error.config).toBeUndefined()
+        expect(error.request).toBeUndefined()
+        expect(JSON.stringify(error)).not.toContain('secret-inbox-token')
+        expect(String(error.stack)).not.toContain('secret-inbox-token')
+      } finally {
+        if (originalTokens === undefined) {
+          delete process.env.COAR_OUTBOUND_TOKENS
+        } else {
+          process.env.COAR_OUTBOUND_TOKENS = originalTokens
+        }
+      }
+    })
+
+    describe('getOutboundActor', () => {
+      const person = {
+        id: 'https://orcid.org/0000-0000-0000-0001',
+        type: 'Person',
+        name: 'Editor',
+      }
+      const original = {
+        id: process.env.COAR_ACTOR_ID,
+        name: process.env.COAR_ACTOR_NAME,
+      }
+
+      afterEach(() => {
+        if (original.id === undefined) delete process.env.COAR_ACTOR_ID
+        else process.env.COAR_ACTOR_ID = original.id
+        if (original.name === undefined) delete process.env.COAR_ACTOR_NAME
+        else process.env.COAR_ACTOR_NAME = original.name
+      })
+
+      it('returns the given actor when COAR_ACTOR_ID is not set', () => {
+        delete process.env.COAR_ACTOR_ID
+        expect(getOutboundActor(person)).toBe(person)
+      })
+
+      it('ignores a blank COAR_ACTOR_ID', () => {
+        process.env.COAR_ACTOR_ID = '  '
+        expect(getOutboundActor(person)).toBe(person)
+      })
+
+      it('replaces the actor with the configured service', () => {
+        process.env.COAR_ACTOR_ID = ' https://kotahi.example.org '
+        process.env.COAR_ACTOR_NAME = 'Example Reviews'
+
+        expect(getOutboundActor(person)).toEqual({
+          id: 'https://kotahi.example.org',
+          type: 'Service',
+          name: 'Example Reviews',
+        })
+      })
+    })
+
     describe('with COAR_OUTBOUND_TOKENS', () => {
       const originalTokens = process.env.COAR_OUTBOUND_TOKENS
 
@@ -675,7 +785,10 @@ describe('COAR Notify inbox API', () => {
 
         await send({ type: 'Announce' })
 
-        expect(authToOrigin).toEqual(['Bearer inbox-token', 'Bearer inbox-token'])
+        expect(authToOrigin).toEqual([
+          'Bearer inbox-token',
+          'Bearer inbox-token',
+        ])
       })
 
       it('does not send a token configured for another inbox', async () => {

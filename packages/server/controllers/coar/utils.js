@@ -91,6 +91,59 @@ const getOutboundTokenForInbox = url => {
   return byOrigin ? byOrigin[1] || null : null
 }
 
+/**
+ * The actor for outgoing COAR Notify messages. When COAR_ACTOR_ID is set, every
+ * message Kotahi sends names this one Service as its actor (named by
+ * COAR_ACTOR_NAME, default "Kotahi"), instead of the editor, reviewer or group.
+ * Receivers such as InvenioRDM only accept messages whose actor id is
+ * registered with them, so a fixed id is easier to register.
+ * @param {object} actor The actor Kotahi would otherwise send
+ * @returns {object}
+ */
+const getOutboundActor = actor => {
+  const id = process.env.COAR_ACTOR_ID?.trim()
+
+  if (!id) return actor
+
+  return {
+    id,
+    type: 'Service',
+    name: process.env.COAR_ACTOR_NAME?.trim() || 'Kotahi',
+  }
+}
+
+const MAX_ERROR_BODY_LENGTH = 500
+
+/**
+ * An error for a failed POST to an inbox that is safe to log: it carries the
+ * status and the inbox's answer, but not the request (with its Authorization
+ * header) that an AxiosError holds.
+ */
+class InboxPostError extends Error {
+  constructor(url, error) {
+    const { response } = error
+    let body = response?.data
+
+    if (body && typeof body !== 'string') body = JSON.stringify(body)
+
+    const detail = body
+      ? `: ${String(body).slice(0, MAX_ERROR_BODY_LENGTH)}`
+      : ''
+
+    super(`POST to ${url} failed: ${error.message}${detail}`)
+    this.name = 'InboxPostError'
+    this.code = error.code
+
+    if (response) {
+      this.response = {
+        status: response.status,
+        headers: response.headers,
+        data: response.data,
+      }
+    }
+  }
+}
+
 const isRetryable = error => {
   const status = error.response?.status
 
@@ -158,7 +211,9 @@ const postToInbox = async (url, payload) => {
         data,
       })
     } catch (error) {
-      if (retryCount >= INBOX_MAX_RETRIES || !isRetryable(error)) throw error
+      if (retryCount >= INBOX_MAX_RETRIES || !isRetryable(error)) {
+        throw new InboxPostError(url, error)
+      }
 
       const delay = getRetryDelayMs(retryCount, error)
 
@@ -173,7 +228,9 @@ const postToInbox = async (url, payload) => {
 }
 
 module.exports = {
+  getOutboundActor,
   getOutboundTokenForInbox,
+  InboxPostError,
   getRorOrganisation,
   postToInbox,
 }

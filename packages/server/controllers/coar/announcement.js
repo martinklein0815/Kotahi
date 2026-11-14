@@ -10,7 +10,7 @@ const {
   CoarNotification,
 } = require('../../models')
 
-const { postToInbox } = require('./utils')
+const { getOutboundActor, postToInbox } = require('./utils')
 
 // TODO: What is the purpose of this?
 const isReviewDoi = () => {
@@ -155,6 +155,8 @@ const getRequestData = async (
       name: formData.groupIdentity.title,
     }
   }
+
+  defaultPayload.actor = getOutboundActor(defaultPayload.actor)
 
   return JSON.stringify(defaultPayload)
 }
