@@ -10,7 +10,12 @@ const {
   CoarNotification,
 } = require('../../models')
 
-const { getOutboundActor, postToInbox } = require('./utils')
+const {
+  getAnnounceContext,
+  getDoiUrl,
+  getOutboundActor,
+  postToInbox,
+} = require('./utils')
 
 // TODO: What is the purpose of this?
 const isReviewDoi = () => {
@@ -36,14 +41,6 @@ const getFlaxUrl = async (groupName, shortId) => {
   flaxUrl = `${clientFlaxSiteUrl}/${groupName}/articles/${shortId}/index.html`
 
   return { flaxReviewUrl, flaxUrl }
-}
-
-const getDoi = manuscript => {
-  if (manuscript.doi.includes('doi.org')) {
-    return manuscript.doi
-  }
-
-  return `https://doi.org/${manuscript.doi}`
 }
 
 const generateUrn = () => `urn:uuid:${uuid()}`
@@ -79,14 +76,10 @@ const getRequestData = async (
   let object = {
     id: reviewer ? flaxReviewUrl : flaxUrl,
     type: ['Document', 'sorg:Review'],
-    ...(reviewer ? { 'ietf:cite-as': flaxReviewUrl } : {}),
+    ...(reviewer && flaxReviewUrl ? { 'ietf:cite-as': flaxReviewUrl } : {}),
   }
 
-  let context = {
-    id: getDoi(manuscript),
-    type: ['Document', 'sorg:AboutPage'],
-    'ietf:cite-as': getDoi(manuscript),
-  }
+  let context = getAnnounceContext(payload, getDoiUrl(manuscript.doi))
 
   if (announcementType === 'endorsement') {
     const id = generateUrn()

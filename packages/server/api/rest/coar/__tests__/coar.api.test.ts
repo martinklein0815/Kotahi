@@ -25,6 +25,8 @@ import {
 } from '../../../../models'
 
 import {
+  getAnnounceContext,
+  getDoiUrl,
   getOutboundActor,
   postToInbox,
 } from '../../../../controllers/coar/utils'
@@ -695,6 +697,100 @@ describe('COAR Notify inbox API', () => {
           process.env.COAR_OUTBOUND_TOKENS = originalTokens
         }
       }
+    })
+
+    describe('getAnnounceContext', () => {
+      const doiUrl = `https://doi.org/${DOI}`
+
+      it("uses the offer's object id and cite-as", () => {
+        const offer = buildOffer()
+        offer.object.id = 'https://repository.test/records/abc'
+        offer.object['ietf:cite-as'] = 'https://doi.org/10.5281/zenodo.1'
+        offer.object['ietf:item'] = {
+          id: 'https://repository.test/records/abc',
+          mediaType: 'text/html',
+          type: ['Page', 'sorg:AboutPage'],
+        }
+
+        expect(getAnnounceContext(offer, doiUrl)).toEqual({
+          id: 'https://repository.test/records/abc',
+          type: ['Document', 'sorg:AboutPage'],
+          'ietf:cite-as': 'https://doi.org/10.5281/zenodo.1',
+          'ietf:item': offer.object['ietf:item'],
+        })
+      })
+
+      it('uses the manuscript DOI as cite-as when the offer has none', () => {
+        const offer = {
+          object: { id: 'https://repository.test/records/abc' },
+        }
+
+        expect(getAnnounceContext(offer, doiUrl)).toEqual({
+          id: 'https://repository.test/records/abc',
+          type: ['Document', 'sorg:AboutPage'],
+          'ietf:cite-as': doiUrl,
+        })
+      })
+
+      it('turns a bare DOI cite-as into a doi.org URL', () => {
+        const offer = {
+          object: { id: 'https://repository.test/r/1', 'ietf:cite-as': DOI },
+        }
+
+        expect(getAnnounceContext(offer)['ietf:cite-as']).toBe(doiUrl)
+      })
+
+      it('leaves cite-as out when there is no cite-as and no DOI', () => {
+        const offer = {
+          object: {
+            id: 'https://repository.test/records/abc',
+            'ietf:cite-as': ' ',
+          },
+        }
+
+        for (const doi of [null, undefined, '']) {
+          const context = getAnnounceContext(offer, doi)
+          expect(context).toEqual({
+            id: 'https://repository.test/records/abc',
+            type: ['Document', 'sorg:AboutPage'],
+          })
+          expect(context).not.toHaveProperty('ietf:cite-as')
+        }
+      })
+
+      it('falls back to the cite-as value when the offer has no object id', () => {
+        expect(getAnnounceContext({ object: {} }, doiUrl)).toEqual({
+          id: doiUrl,
+          type: ['Document', 'sorg:AboutPage'],
+          'ietf:cite-as': doiUrl,
+        })
+      })
+
+      it('does not throw for an offer without an object', () => {
+        expect(getAnnounceContext(undefined, null)).toEqual({
+          type: ['Document', 'sorg:AboutPage'],
+        })
+      })
+    })
+
+    describe('getDoiUrl', () => {
+      it('returns null when there is no DOI', () => {
+        expect(getDoiUrl(null)).toBeNull()
+        expect(getDoiUrl(undefined)).toBeNull()
+        expect(getDoiUrl('')).toBeNull()
+        expect(getDoiUrl('  ')).toBeNull()
+      })
+
+      it('turns a bare DOI or doi: URI into a doi.org URL', () => {
+        expect(getDoiUrl(DOI)).toBe(`https://doi.org/${DOI}`)
+        expect(getDoiUrl(`doi:${DOI}`)).toBe(`https://doi.org/${DOI}`)
+      })
+
+      it('keeps a doi.org URL', () => {
+        expect(getDoiUrl(`https://dx.doi.org/${DOI}`)).toBe(
+          `https://dx.doi.org/${DOI}`,
+        )
+      })
     })
 
     describe('getOutboundActor', () => {

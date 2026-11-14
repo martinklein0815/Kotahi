@@ -112,6 +112,60 @@ const getOutboundActor = actor => {
   }
 }
 
+/**
+ * A DOI as a https://doi.org/ URL, or null when there is none. Accepts a bare
+ * DOI ("10.1234/abc"), a doi: URI or a doi.org URL.
+ * @param {string|null|undefined} doi
+ * @returns {string|null}
+ */
+const getDoiUrl = doi => {
+  const value = typeof doi === 'string' ? doi.trim() : ''
+
+  if (!value) return null
+  if (/^https?:\/\/(dx\.)?doi\.org\//i.test(value)) return value
+
+  return `https://doi.org/${value.replace(/^doi:/i, '')}`
+}
+
+/**
+ * A cite-as value as a URI: bare DOIs become https://doi.org/ URLs, anything
+ * else is kept. Returns null when there is no value.
+ * @param {string|null|undefined} value
+ * @returns {string|null}
+ */
+const toCiteAs = value => {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+
+  if (!trimmed) return null
+
+  return /^(doi:)?10\.\d{4,}\//i.test(trimmed) ? getDoiUrl(trimmed) : trimmed
+}
+
+/**
+ * The context of an Announce: the resource the original Offer was about. Its
+ * id is the Offer's object id (the record at the sender, e.g. a repository
+ * landing page), so the sender can find its own record. ietf:cite-as is
+ * optional in COAR Notify: it is the Offer's own object ietf:cite-as, else the
+ * manuscript DOI, and is left out when there is neither. The id falls back to
+ * the cite-as value when the Offer has no object id.
+ * @param {object} offerPayload The original Offer
+ * @param {string|null} [doiUrl] The manuscript DOI as a https://doi.org/ URL
+ * @returns {object}
+ */
+const getAnnounceContext = (offerPayload, doiUrl) => {
+  const offerObject = offerPayload?.object ?? {}
+  const item = offerObject['ietf:item']
+  const citeAs = toCiteAs(offerObject['ietf:cite-as']) || toCiteAs(doiUrl)
+  const id = offerObject.id || citeAs
+
+  return {
+    ...(id ? { id } : {}),
+    type: ['Document', 'sorg:AboutPage'],
+    ...(citeAs ? { 'ietf:cite-as': citeAs } : {}),
+    ...(item ? { 'ietf:item': item } : {}),
+  }
+}
+
 const MAX_ERROR_BODY_LENGTH = 500
 
 /**
@@ -228,6 +282,8 @@ const postToInbox = async (url, payload) => {
 }
 
 module.exports = {
+  getAnnounceContext,
+  getDoiUrl,
   getOutboundActor,
   getOutboundTokenForInbox,
   InboxPostError,
