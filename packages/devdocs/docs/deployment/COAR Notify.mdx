@@ -1,0 +1,213 @@
+# COAR Notify
+
+Kotahi can take part in [COAR Notify](https://coar-notify.net/) exchanges.
+Each group has its own inbox at `https://<server>/api/coar/inbox/<group name>`.
+A repository (such as InvenioRDM) sends it an Offer asking for a review.
+Kotahi creates a manuscript from the Offer and later reports back to the
+sender's inbox: a TentativeAccept or Reject when an editor decides, and an
+Announce when the review is published.
+
+This page describes how that exchange works and which environment variables
+change it. It covers the following changes on top of release
+`2026.11.03-0`:
+
+| Change | Environment variables |
+| --- | --- |
+| Bearer tokens on outgoing messages | `COAR_OUTBOUND_TOKENS` |
+| One fixed actor on outgoing messages; inbox errors logged without tokens | `COAR_ACTOR_ID`, `COAR_ACTOR_NAME` |
+| Announce context names the sender's record; `ietf:cite-as` is optional | none |
+| Offers accepted without a DOI | none |
+| Metadata for records without a DOI found through Signposting | `COAR_SIGNPOSTING` |
+
+New reviews can also be made public and named by default, which matters for
+publishing Announces. See the *Review visibility defaults* page in this section.
+
+:::note
+If your `docker-compose.yml` lists the server's environment variables one by
+one, add the variables on this page to that list, or they won't reach the
+container.
+:::
+
+## Setting up a group's inbox
+
+In **Admin > Configuration > Integrations > COAR Notify**, set an auth token.
+Senders must send it as `Authorization: Bearer <token>` with every
+notification. A request without it, or with a different token, is answered
+with `403 Unauthorised Request` and flagged back to the sender as an
+`UnprocessableNotification`.
+
+The reason for a rejection is only in the HTTP response body
+(`{"message": "..."}`); the server log does not record it.
+
+## Incoming Offers
+
+Kotahi accepts these notifications:
+
+- `["Offer", "coar-notify:ReviewAction"]`, which creates a manuscript
+- `Undo` of an earlier Offer, which archives that Offer's manuscript
+
+Any other type is rejected with `400`.
+
+The Offer's `object` describes the work to review. `object.id` is required.
+`object["ietf:cite-as"]` is optional, and it does not have to be a DOI.
+
+### When the cite-as is a DOI
+
+Kotahi treats `object["ietf:cite-as"]` as a DOI when it is a bare DOI
+(`10.1234/abc`), a `doi:` URI or a `doi.org` URL. In that case:
+
+1. `https://doi.org/doiRA/<doi>` names the registration agency. Only
+   Crossref and DataCite are supported; any other agency is rejected with
+   `400`.
+2. The manuscript is filled from the Crossref
+   (`api.crossref.org/works/doi/<doi>`) or DataCite
+   (`api.datacite.org/dois/<doi>`) record: title, abstract, authors, date,
+   journal or publisher, topics and URL. For Crossref authors whose
+   affiliation has a ROR id but no name, the name comes from ROR.
+3. Submission form fields with a `metadataMapping` are copied from the same
+   record.
+
+A second Offer for the same DOI is rejected, and so is an Offer for a DOI that
+a manuscript in the group already has.
+
+### When the cite-as is not a DOI, or missing
+
+The Offer is accepted and the manuscript gets `doi` empty. Its metadata
+comes from the record's [Signposting](https://signposting.org/), when the
+repository provides it:
+
+1. Kotahi fetches the cite-as URL (then `object.id`, if that is different).
+   It reads the `Link` headers for `rel="describedby"` links, which name the
+   record's metadata documents.
+2. When the headers name no metadata document but do have a
+   `rel="linkset"` link, Kotahi fetches the linkset
+   ([RFC 9264](https://www.rfc-editor.org/rfc/rfc9264)). Both
+   `application/linkset+json` and `application/linkset` are read. Only links
+   whose `anchor` is the record are used. If no link has that anchor, the
+   first anchor with `describedby` links is used.
+3. Each metadata document is requested with its media type as the `Accept`
+   header, since some repositories (InvenioRDM among them) serve every format
+   from one URL. Kotahi reads, in this order of preference:
+   - DataCite JSON (`application/vnd.datacite.datacite+json`,
+     `application/x-datacite+json`)
+   - CSL JSON (`application/vnd.citationstyles.csl+json`,
+     `application/citeproc+json`)
+   - schema.org JSON-LD (`application/ld+json`)
+4. The first document with a title fills the manuscript:
+
+   | Submission field | Filled from |
+   | --- | --- |
+   | `$title` | title |
+   | `$abstract` | abstract or description |
+   | `$authors` | creators/authors, with ORCID and affiliations (ROR id when given) |
+   | `firstAuthor` | first author, as `Family, Given` |
+   | `datePublished` | issued or published date |
+   | `topics` | subjects or keywords |
+   | `journal` | publisher or container title |
+   | `url` | the cite-as URL |
+
+If Signposting gives nothing usable, the manuscript gets the record URL
+(cite-as, else `object["ietf:item"].id`, else `object.id`) in `url`, and a
+title from `object["sorg:name"]`, `object.name` or `object.title`, falling
+back to the URL.
+
+A second Offer with exactly the same non-DOI cite-as is rejected as a
+duplicate.
+
+:::info
+Only fields that exist in the group's submission form show in the
+manuscript page and the manuscripts table. To see the author list, add a
+field named `submission.$authors` to the form. To see these values as columns,
+use their field names in the manuscripts table columns setting, for example
+`shortId,submission.$title,submission.firstAuthor,submission.datePublished,created,updated,status`.
+:::
+
+#### Limits on Signposting requests
+
+The URLs come from incoming notifications, so the requests are restricted:
+
+- only `http` and `https`
+- no hosts that resolve to private, loopback, link-local or multicast
+  addresses, checked again on every redirect (at most 5 redirects)
+- a 10 second timeout and a 2 MB limit for each response
+- at most two linksets and four metadata documents for each record URL
+
+Failures are logged as warnings starting with `Signposting:`, and the Offer
+is still accepted with the fallback metadata. A successful lookup is not
+logged.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `COAR_SIGNPOSTING` | on | `false` turns the Signposting lookup off |
+| `COAR_SIGNPOSTING_ALLOW_PRIVATE_HOSTS` | off | `true` skips the address check. For tests only |
+
+## Outgoing notifications
+
+### Bearer tokens
+
+Stock Kotahi sends no `Authorization` header. Some inboxes, such as
+InvenioRDM's, require one. Set `COAR_OUTBOUND_TOKENS` to a JSON object that
+maps an inbox URL, or an origin (scheme and host), to its token:
+
+```bash
+COAR_OUTBOUND_TOKENS={"https://repo.example.org/api/notify-inbox":"s3cret","https://other.example.org":"t0ken"}
+```
+
+An exact inbox URL wins over an origin; trailing slashes are ignored. Inboxes
+without a match get no header. If the value is not valid JSON, an error is
+logged and messages go out without tokens.
+
+### The actor
+
+By default the actor of an outgoing message is the handling editor (TentativeAccept),
+the reviewer (review Announce), an anonymous person (anonymous review Announce) or
+the group (endorsement and relationship Announces). Receivers that check the
+actor, such as InvenioRDM, then need every editor and reviewer registered.
+
+Set `COAR_ACTOR_ID` to send one Service as the actor of every outgoing
+message instead (TentativeAccept, Reject, TentativeReject, Announce and
+UnprocessableNotification):
+
+```bash
+COAR_ACTOR_ID=https://kotahi.example.org
+# optional, default "Kotahi"
+COAR_ACTOR_NAME=Example Reviews
+```
+
+A blank value keeps the default behaviour.
+
+### Errors from the receiving inbox
+
+Requests that fail with 408, 429 or 5xx are retried up to three times with
+exponential backoff, honouring `Retry-After`. When a request finally fails,
+the error that is logged carries the status and the inbox's answer, but not
+the request, so the `Authorization` header is never written to the log.
+
+### The Announce context
+
+An Announce's `context` is the resource the original Offer was about:
+
+- `context.id` is the Offer's `object.id` (the record at the sender), so
+  senders that look up their record from `context.id`, such as InvenioRDM,
+  can find it. It falls back to the cite-as value when the Offer had no
+  `object.id`.
+- `context["ietf:cite-as"]` is the Offer's own `object["ietf:cite-as"]` (any
+  URI), else the manuscript's DOI as a `https://doi.org/` URL. When there is
+  neither, the field is left out rather than sent empty. A manuscript without
+  a DOI no longer makes the Announce fail.
+- The Offer's `object["ietf:item"]` is carried over.
+
+The review object's `ietf:cite-as` (the review's page on the Flax site) is
+only sent for a named reviewer.
+
+## Testing
+
+The server tests for all of the above are in
+`packages/server/api/rest/coar/__tests__/coar.api.test.ts` and
+`packages/server/controllers/coar/__tests__/signposting.test.ts`. They need
+a Postgres database, like the rest of the server tests:
+
+```bash
+cd packages/server
+yarn vitest run api/rest/coar controllers/coar
+```

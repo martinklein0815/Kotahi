@@ -1,0 +1,24 @@
+# Review visibility defaults
+
+When a reviewer accepts an invitation, Kotahi creates their review hidden
+from the author and with the reviewer's name hidden. A review that is hidden
+from the author is not published on the Flax site or announced over COAR
+Notify until an editor unhides it.
+
+Two environment variables change these defaults for new reviews:
+
+| Variable | Default | Effect when `true` |
+| --- | --- | --- |
+| `REVIEW_DEFAULT_PUBLIC` | unset (hidden) | New reviews are visible to the author, so they can be published |
+| `REVIEW_DEFAULT_NAMED` | unset (anonymous) | New reviews show the reviewer's name |
+
+Any other value, or leaving them unset, keeps Kotahi's defaults. Reviews that
+already exist are not changed.
+
+Editors can still change both settings for each review, provided the group's
+configuration has `controlPanel.hideReview` turned on. That setting shows the
+"Hide review" and "Hide reviewer name" checkboxes.
+
+Whether a review's content appears on the published page also depends on the
+review form: each field needs `permitPublishing` set to `always`, or to
+`true` with the field selected for publishing on the manuscript.
