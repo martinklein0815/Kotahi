@@ -152,9 +152,15 @@ class CoarNotification extends BaseModel {
       .andWhere(builder => {
         builder.whereRaw(`payload->>'id' = ?`, [notificationId])
 
-        if (doi) {
+        // A bare DOI matches any cite-as spelling of it (doi.org URL or
+        // not); any other cite-as, such as a record URL, must match exactly.
+        if (doi && /^10\./.test(doi)) {
           builder.orWhereRaw(`(payload->'object'->>'ietf:cite-as') ILIKE ?`, [
             `%${doi}%`,
+          ])
+        } else if (doi) {
+          builder.orWhereRaw(`trim(payload->'object'->>'ietf:cite-as') = ?`, [
+            doi,
           ])
         }
       })

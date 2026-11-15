@@ -442,9 +442,51 @@ const linkManuscriptToNotification = async (
     .patch({ manuscriptId })
 }
 
+/** The Offer's object ietf:cite-as, trimmed, or null. It is optional. */
+const extractCiteAs = payload => {
+  const citeAs = payload?.object?.['ietf:cite-as']
+  return typeof citeAs === 'string' && citeAs.trim() ? citeAs.trim() : null
+}
+
+/**
+ * The DOI in the Offer's object ietf:cite-as, or null when there is no cite-as
+ * or it is not a DOI (such as a repository record URL).
+ */
 const extractDoi = payload => {
-  const doi = payload.object && payload.object['ietf:cite-as']
-  return doi ? doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : null
+  const doi = extractCiteAs(payload)
+    ?.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')
+    .replace(/^doi:/i, '')
+
+  return doi && /^10\.\d{4,}\/\S+$/.test(doi) ? doi : null
+}
+
+/**
+ * A manuscript for an Offer whose object has no DOI. There is no DOI metadata
+ * to look up, so it gets what the Offer itself says: the record URL (cite-as,
+ * else ietf:item, else the object id) and a title if the object has one.
+ */
+const extractManuscriptWithoutDoi = async (payload, groupId, options = {}) => {
+  const { object } = payload
+  const item = object['ietf:item']
+  const itemUrl = Array.isArray(item) ? item[0]?.id : item?.id
+  const url = extractCiteAs(payload) || itemUrl || object.id
+  const title = object['sorg:name'] || object.name || object.title || url
+
+  return Manuscript.createNewManuscript(
+    {
+      submission: {
+        $doi: '',
+        url,
+        $title: rawTitleToSafeHtml(title) || '',
+        $abstract: '',
+      },
+      status: 'new',
+      meta: { title },
+      importSourceServer: 'COAR',
+      groupId,
+    },
+    options,
+  )
 }
 
 const extractNotificationType = payload => {
@@ -541,11 +583,12 @@ const processNotification = async (
     )
   }
 
+  // Without a DOI, an earlier Offer with the same cite-as counts as the same
   const existingNotification =
     await CoarNotification.getOfferNotificationForGroupByIdOrDoi(
       groupId,
       type === 'Undo' ? payload.inReplyTo : payload.id,
-      doi,
+      doi || (type === 'Offer' ? extractCiteAs(payload) : null),
       options,
     )
 
@@ -586,25 +629,29 @@ const processNotification = async (
     )
   }
 
-  // may contain the error message to be returned
-  const doiRa = await getDoiRegistrationAgency(doi)
-
-  if (!supportedDoiRegistrationAgencies.includes(doiRa)) {
-    return generate400Error(doiRa)
-  }
-
   let newManuscript
 
-  try {
-    // only returns a new manuscipt, else null for existing
-    newManuscript = await extractManuscriptFromNotification(
-      payload,
-      groupId,
-      doiRa,
-      options,
-    )
-  } catch (extractError) {
-    return generate400Error(extractError.message)
+  if (doi) {
+    // may contain the error message to be returned
+    const doiRa = await getDoiRegistrationAgency(doi)
+
+    if (!supportedDoiRegistrationAgencies.includes(doiRa)) {
+      return generate400Error(doiRa)
+    }
+
+    try {
+      // only returns a new manuscipt, else null for existing
+      newManuscript = await extractManuscriptFromNotification(
+        payload,
+        groupId,
+        doiRa,
+        options,
+      )
+    } catch (extractError) {
+      return generate400Error(extractError.message)
+    }
+  } else {
+    newManuscript = await extractManuscriptWithoutDoi(payload, groupId, options)
   }
 
   // A manuscript with this DOI already exists (e.g. a manual submission), so let the sender know

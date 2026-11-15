@@ -504,6 +504,76 @@ describe('COAR Notify inbox API', () => {
       )
     })
 
+    describe('without a DOI', () => {
+      const RECORD = 'https://repository.test/records/abc'
+
+      const buildRecordOffer = (citeAs?: string) =>
+        buildOffer({
+          object: {
+            id: RECORD,
+            ...(citeAs === undefined ? {} : { 'ietf:cite-as': citeAs }),
+            'sorg:name': 'A record without a DOI',
+            type: 'sorg:AboutPage',
+          },
+        })
+
+      const manuscriptsInGroup = async (): Promise<Manuscript[]> =>
+        Manuscript.query().where({ groupId: group.id })
+
+      it('accepts a cite-as that is not a DOI', async () => {
+        const offer = buildRecordOffer(RECORD)
+
+        const result = await post(offer)
+
+        expect(result).toEqual({
+          status: 202,
+          message: 'Notification created successfully.',
+        })
+
+        const [manuscript] = await manuscriptsInGroup()
+        expect(manuscript.doi).toBeNull()
+        expect(manuscript.submission.url).toBe(RECORD)
+        expect(manuscript.submission.$title).toContain('A record without a DOI')
+
+        const notification = await CoarNotification.query()
+          .whereRaw(`payload->>'id' = ?`, [offer.id])
+          .first()
+
+        expect(notification?.manuscriptId).toBe(manuscript.id)
+        expect(sentToOrigin).toHaveLength(0)
+      })
+
+      it('accepts an offer without a cite-as', async () => {
+        const result = await post(buildRecordOffer())
+
+        expect(result.status).toBe(202)
+
+        const [manuscript] = await manuscriptsInGroup()
+        expect(manuscript.submission.url).toBe(RECORD)
+      })
+
+      it('rejects a second offer with the same cite-as', async () => {
+        await post(buildRecordOffer(RECORD))
+
+        const result = await post(buildRecordOffer(RECORD))
+
+        expect(result).toEqual({
+          status: 400,
+          message: 'Notification already exists with the same payload.',
+        })
+        expect(await manuscriptsInGroup()).toHaveLength(1)
+      })
+
+      it('does not treat a longer record URL as the same record', async () => {
+        await post(buildRecordOffer(RECORD))
+
+        const result = await post(buildRecordOffer(`${RECORD}1`))
+
+        expect(result.status).toBe(202)
+        expect(await manuscriptsInGroup()).toHaveLength(2)
+      })
+    })
+
     it('rolls back the manuscript when storing the notification fails', async () => {
       // Postgres jsonb can't store \u0000, so the insert after the manuscript fails
       const offer = JSON.stringify(buildOffer()).replace(
