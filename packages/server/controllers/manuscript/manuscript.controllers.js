@@ -1790,10 +1790,12 @@ const reviewerResponse = async (action, teamId, userId) => {
 
   // modify it to check if there exists a review already
   if (action === 'accepted' && existingReview.length === 0) {
+    // Local patch: defaults come from REVIEW_DEFAULT_PUBLIC / REVIEW_DEFAULT_NAMED
+    // ("true" makes new reviews visible / named). Unset keeps Kotahi's hidden + anonymous.
     const review = {
       isDecision: false,
-      isHiddenReviewerName: true,
-      isHiddenFromAuthor: true,
+      isHiddenReviewerName: process.env.REVIEW_DEFAULT_NAMED !== 'true',
+      isHiddenFromAuthor: process.env.REVIEW_DEFAULT_PUBLIC !== 'true',
       userId: team.role === 'collaborativeReviewer' ? null : userId,
       manuscriptId: team.objectId,
       isCollaborative: team.role === 'collaborativeReviewer',
