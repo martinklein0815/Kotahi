@@ -2,6 +2,7 @@ const { get } = require('lodash')
 const { logger, serverUrl, request, useTransaction } = require('@coko/server')
 const { getCrossrefDataViaDoi } = require('./crossRef')
 const { getDataciteViaDoi } = require('./dataCite')
+const { getSignpostingMetadata } = require('./signposting')
 const { makeAnnouncementOnCOAR, generateUrn } = require('./announcement')
 const { getOutboundActor, postToInbox } = require('./utils')
 
@@ -461,16 +462,57 @@ const extractDoi = payload => {
 }
 
 /**
- * A manuscript for an Offer whose object has no DOI. There is no DOI metadata
- * to look up, so it gets what the Offer itself says: the record URL (cite-as,
- * else ietf:item, else the object id) and a title if the object has one.
+ * A manuscript for an Offer whose object has no DOI. Its metadata comes from
+ * the record's Signposting (Link headers or a linkset naming a metadata
+ * record: DataCite JSON, CSL JSON or schema.org JSON-LD), tried on the
+ * cite-as URL and then the object id. When Signposting gives nothing, the
+ * manuscript gets what the Offer itself says: the record URL (cite-as, else
+ * ietf:item, else the object id) and a title if the object has one.
  */
 const extractManuscriptWithoutDoi = async (payload, groupId, options = {}) => {
   const { object } = payload
   const item = object['ietf:item']
   const itemUrl = Array.isArray(item) ? item[0]?.id : item?.id
-  const url = extractCiteAs(payload) || itemUrl || object.id
-  const title = object['sorg:name'] || object.name || object.title || url
+  const citeAs = extractCiteAs(payload)
+  const url = citeAs || itemUrl || object.id
+  const offerTitle = object['sorg:name'] || object.name || object.title
+
+  const metadata = await getSignpostingMetadata([citeAs, object.id])
+
+  if (metadata) {
+    const {
+      title,
+      abstract,
+      $authors,
+      author,
+      publishedDate,
+      topics,
+      journal,
+    } = metadata
+
+    return Manuscript.createNewManuscript(
+      {
+        submission: {
+          datePublished: publishedDate,
+          $abstract: rawAbstractToSafeHtml(abstract) || '',
+          firstAuthor: author,
+          journal,
+          topics,
+          $doi: '',
+          url: citeAs || metadata.url || url,
+          $title: rawTitleToSafeHtml(title) || '',
+          $authors,
+        },
+        status: 'new',
+        meta: { title },
+        importSourceServer: 'COAR',
+        groupId,
+      },
+      options,
+    )
+  }
+
+  const title = offerTitle || url
 
   return Manuscript.createNewManuscript(
     {

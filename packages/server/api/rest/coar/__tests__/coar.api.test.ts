@@ -113,6 +113,19 @@ let authToOrigin: (string | undefined)[] = []
 // Responses the origin inbox gives before it starts accepting notifications
 let originInboxFailures: InboxFailure[] = []
 
+// Web pages and documents a repository serves for Signposting, by URL, or by
+// "<URL> <Accept>" where the same URL serves several formats
+type WebPage = {
+  status?: number
+  headers?: Record<string, string>
+  data?: unknown
+}
+
+let webPages: Record<string, WebPage> = {}
+
+// The URL and Accept header of each request for a web page
+let webRequests: { url: string; accept?: string }[] = []
+
 const rejectAs = (
   axiosConfig: AxiosConfig,
   { status, headers = {} }: InboxFailure,
@@ -183,6 +196,27 @@ const fakeAdapter = (axiosConfig: AxiosConfig): Promise<AxiosResponse> => {
     return failure
       ? rejectAs(axiosConfig, failure)
       : respond(axiosConfig, 201, {})
+  }
+
+  const accept = String(
+    axiosConfig.headers?.get?.('Accept') ?? axiosConfig.headers?.Accept ?? '',
+  )
+
+  const page = webPages[`${url} ${accept}`] ?? webPages[url]
+
+  if (page) {
+    webRequests.push({ url, accept })
+
+    return Promise.resolve({
+      data:
+        typeof page.data === 'string' || page.data === undefined
+          ? (page.data ?? '')
+          : JSON.stringify(page.data),
+      status: page.status ?? 200,
+      statusText: String(page.status ?? 200),
+      headers: page.headers ?? {},
+      config: axiosConfig,
+    })
   }
 
   return Promise.reject(new Error(`Unexpected outbound request: ${url}`))
@@ -256,6 +290,10 @@ describe('COAR Notify inbox API', () => {
     Manuscript.query().where({ doi: DOI, groupId: group.id })
 
   beforeAll(async () => {
+    // Test hosts such as repository.test don't resolve, and are served by the
+    // fake adapter anyway
+    process.env.COAR_SIGNPOSTING_ALLOW_PRIVATE_HOSTS = 'true'
+
     await config.init()
     db.init()
     await migrationManager.migrate()
@@ -283,6 +321,8 @@ describe('COAR Notify inbox API', () => {
     sentToOrigin = []
     authToOrigin = []
     originInboxFailures = []
+    webPages = {}
+    webRequests = []
 
     group = await Group.insert({ name: 'coar-group', isArchived: false })
 
@@ -571,6 +611,262 @@ describe('COAR Notify inbox API', () => {
 
         expect(result.status).toBe(202)
         expect(await manuscriptsInGroup()).toHaveLength(2)
+      })
+
+      describe('with Signposting', () => {
+        const API = 'https://repository.test/api/records/abc'
+        const ORCID = '0000-0002-1825-0097'
+
+        const dataciteJson = {
+          titles: [{ title: 'Signposted record' }],
+          creators: [
+            {
+              name: 'Lovelace, Ada',
+              nameType: 'Personal',
+              givenName: 'Ada',
+              familyName: 'Lovelace',
+              nameIdentifiers: [
+                { nameIdentifier: ORCID, nameIdentifierScheme: 'ORCID' },
+              ],
+              affiliation: [
+                {
+                  name: 'Test University',
+                  affiliationIdentifier: 'https://ror.org/test',
+                  affiliationIdentifierScheme: 'ROR',
+                },
+              ],
+            },
+            { name: 'Hopper, Grace', nameType: 'Personal' },
+            { name: 'A Consortium', nameType: 'Organizational' },
+          ],
+          descriptions: [
+            {
+              description: '<p>An abstract from DataCite.</p>',
+              descriptionType: 'Abstract',
+            },
+          ],
+          publisher: 'Test Repository',
+          publicationYear: '2026',
+          dates: [{ date: '2026-11-01', dateType: 'Issued' }],
+          subjects: [{ subject: 'Testing' }],
+        }
+
+        type Author = {
+          firstName: string
+          lastName: string
+          orcid: string
+          ror: { label: string; value: string }[]
+        }
+
+        const onlyManuscript = async (): Promise<Manuscript> => {
+          const manuscripts = await manuscriptsInGroup()
+          expect(manuscripts).toHaveLength(1)
+          return manuscripts[0]
+        }
+
+        it('reads the metadata record named in the Link headers', async () => {
+          webPages[RECORD] = {
+            headers: {
+              link: [
+                '<https://doi.org/10.5281/zenodo.1> ; rel="cite-as"',
+                `<${API}> ; rel="describedby" ; type="application/x-bibtex"`,
+                `<${API}> ; rel="describedby" ; type="application/vnd.datacite.datacite+json"`,
+                `<${API}> ; rel="linkset" ; type="application/linkset+json"`,
+              ].join(', '),
+            },
+            data: '<html></html>',
+          }
+          webPages[`${API} application/vnd.datacite.datacite+json`] = {
+            data: dataciteJson,
+          }
+
+          const result = await post(buildRecordOffer(RECORD))
+          expect(result.status).toBe(202)
+
+          const { submission, doi } = await onlyManuscript()
+          expect(doi).toBeNull()
+          expect(submission.$title).toContain('Signposted record')
+          expect(submission.$abstract).toContain('An abstract from DataCite.')
+          expect(submission.datePublished).toBe('2026-11-01')
+          expect(submission.journal).toBe('Test Repository')
+          expect(submission.topics).toEqual(['Testing'])
+          expect(submission.url).toBe(RECORD)
+          expect(submission.firstAuthor).toBe('Lovelace, Ada')
+          expect(
+            submission.$authors.map((a: Author) => [
+              a.firstName,
+              a.lastName,
+              a.orcid,
+              a.ror,
+            ]),
+          ).toEqual([
+            [
+              'Ada',
+              'Lovelace',
+              ORCID,
+              [{ label: 'Test University', value: 'https://ror.org/test' }],
+            ],
+            ['Grace', 'Hopper', '', []],
+          ])
+
+          // The headers named a metadata record, so the linkset isn't needed
+          expect(webRequests.map(r => r.url)).toEqual([RECORD, API])
+          expect(webRequests[1].accept).toBe(
+            'application/vnd.datacite.datacite+json',
+          )
+        })
+
+        it('reads the metadata record named in a JSON linkset', async () => {
+          webPages[RECORD] = {
+            headers: {
+              link: `<${API}> ; rel="linkset" ; type="application/linkset+json"`,
+            },
+          }
+          webPages[`${API} application/linkset+json`] = {
+            headers: { 'content-type': 'application/linkset+json' },
+            data: {
+              linkset: [
+                {
+                  anchor: `${API}/files/paper.pdf/content`,
+                  collection: [{ href: RECORD, type: 'text/html' }],
+                },
+                {
+                  anchor: RECORD,
+                  describedby: [
+                    {
+                      href: `${RECORD}/export/csl`,
+                      type: 'application/vnd.citationstyles.csl+json',
+                    },
+                  ],
+                },
+              ],
+            },
+          }
+          webPages[`${RECORD}/export/csl`] = {
+            data: {
+              title: 'Signposted via a JSON linkset',
+              abstract: 'An abstract from CSL.',
+              author: [{ family: 'Turing', given: 'Alan' }],
+              issued: { 'date-parts': [[2026, 3, 5]] },
+              publisher: 'Test Repository',
+            },
+          }
+
+          expect((await post(buildRecordOffer(RECORD))).status).toBe(202)
+
+          const { submission } = await onlyManuscript()
+          expect(submission.$title).toContain('Signposted via a JSON linkset')
+          expect(submission.$abstract).toContain('An abstract from CSL.')
+          expect(submission.datePublished).toBe('2026-03-05')
+          expect(submission.$authors.map((a: Author) => a.lastName)).toEqual([
+            'Turing',
+          ])
+        })
+
+        it('reads the metadata record named in a text linkset', async () => {
+          webPages[RECORD] = {
+            headers: {
+              link: `<${API}/linkset> ; rel="linkset" ; type="application/linkset"`,
+            },
+          }
+          webPages[`${API}/linkset`] = {
+            headers: { 'content-type': 'application/linkset' },
+            data: [
+              `<${RECORD}/export/json-ld>`,
+              '   ; rel="describedby" ; type="application/ld+json"',
+              `   ; anchor="${RECORD}",`,
+              `<https://orcid.org/${ORCID}> ; rel="author" ; anchor="${RECORD}"`,
+            ].join('\n'),
+          }
+          webPages[`${RECORD}/export/json-ld`] = {
+            data: {
+              '@context': 'http://schema.org',
+              '@type': 'Dataset',
+              name: 'Signposted via a text linkset',
+              description: 'An abstract from JSON-LD.',
+              creator: [
+                {
+                  '@type': 'Person',
+                  '@id': `https://orcid.org/${ORCID}`,
+                  givenName: 'Grace',
+                  familyName: 'Hopper',
+                  affiliation: {
+                    '@type': 'Organization',
+                    '@id': 'https://ror.org/navy',
+                    name: 'Navy',
+                  },
+                },
+              ],
+              datePublished: '2026-01-02',
+              keywords: ['compilers', 'testing'],
+            },
+          }
+
+          expect((await post(buildRecordOffer(RECORD))).status).toBe(202)
+
+          const { submission } = await onlyManuscript()
+          expect(submission.$title).toContain('Signposted via a text linkset')
+          expect(submission.$abstract).toContain('An abstract from JSON-LD.')
+          expect(submission.datePublished).toBe('2026-01-02')
+          expect(submission.topics).toEqual(['compilers', 'testing'])
+          expect(
+            submission.$authors.map((a: Author) => [
+              a.lastName,
+              a.orcid,
+              a.ror,
+            ]),
+          ).toEqual([
+            [
+              'Hopper',
+              ORCID,
+              [{ label: 'Navy', value: 'https://ror.org/navy' }],
+            ],
+          ])
+        })
+
+        it('follows a redirect and resolves relative links', async () => {
+          const shortUrl = 'https://repository.test/r/abc'
+
+          webPages[shortUrl] = { status: 302, headers: { location: RECORD } }
+          webPages[RECORD] = {
+            headers: {
+              link: '</api/records/abc> ; rel="describedby" ; type="application/vnd.datacite.datacite+json"',
+            },
+          }
+          webPages[`${API} application/vnd.datacite.datacite+json`] = {
+            data: dataciteJson,
+          }
+
+          expect((await post(buildRecordOffer(shortUrl))).status).toBe(202)
+
+          const { submission } = await onlyManuscript()
+          expect(submission.$title).toContain('Signposted record')
+          expect(submission.url).toBe(shortUrl)
+        })
+
+        it('falls back to the offer when the metadata record is unreadable', async () => {
+          webPages[RECORD] = {
+            headers: {
+              link: `<${API}> ; rel="describedby" ; type="application/ld+json"`,
+            },
+          }
+          webPages[`${API} application/ld+json`] = { data: 'not json' }
+
+          expect((await post(buildRecordOffer(RECORD))).status).toBe(202)
+
+          const { submission } = await onlyManuscript()
+          expect(submission.$title).toContain('A record without a DOI')
+          expect(submission.url).toBe(RECORD)
+        })
+
+        it('falls back to the offer when the record has no Signposting', async () => {
+          webPages[RECORD] = { data: '<html></html>' }
+
+          expect((await post(buildRecordOffer(RECORD))).status).toBe(202)
+
+          const { submission } = await onlyManuscript()
+          expect(submission.$title).toContain('A record without a DOI')
+        })
       })
     })
 
